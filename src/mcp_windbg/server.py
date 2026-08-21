@@ -14,18 +14,23 @@ from .kd_session import KDSession
 from .filter_script import FilterScript, load_filter_script
 from .prompts import load_prompt
 
-from mcp.shared.exceptions import McpError
+from mcp.shared.exceptions import MCPError
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from mcp.types import (
-    ErrorData,
     TextContent,
     Tool,
     Prompt,
     PromptArgument,
     PromptMessage,
     GetPromptResult,
+    ListToolsResult,
+    CallToolResult,
+    ListPromptsResult,
+    CallToolRequestParams,
+    GetPromptRequestParams,
+    PaginatedRequestParams,
     INVALID_PARAMS,
     INTERNAL_ERROR,
 )
@@ -75,29 +80,29 @@ def _register_session(session, kind: str, label: str) -> str:
 
 
 def _require_session(session_id: str, kind: str):
-    """Return the session for ``session_id``, or raise a helpful McpError.
+    """Return the session for ``session_id``, or raise a helpful MCPError.
 
     Enforces that the session is of the expected kind so ``run_cdb_command`` on a
     kernel session (or vice versa) fails clearly instead of misbehaving.
     """
     record = _sessions.get(session_id)
     if record is None:
-        raise McpError(ErrorData(
-            code=INVALID_PARAMS,
-            message=(
+        raise MCPError(
+            INVALID_PARAMS,
+            (
                 f"Unknown session_id {session_id!r}. Open a session first - the "
                 f"open_* tools return a session_id to use here."
             ),
-        ))
+        )
     if record["kind"] != kind:
         actual = record["kind"]
-        raise McpError(ErrorData(
-            code=INVALID_PARAMS,
-            message=(
+        raise MCPError(
+            INVALID_PARAMS,
+            (
                 f"session_id {session_id!r} is a {actual} session, not {kind}. "
                 f"Use run_{actual}_command / close_{actual}_session for it."
             ),
-        ))
+        )
     return record["session"]
 
 
@@ -110,19 +115,19 @@ def _require_live_session(session_id: str, what: str):
     """
     record = _sessions.get(session_id)
     if record is None:
-        raise McpError(ErrorData(
-            code=INVALID_PARAMS,
-            message=f"Unknown session_id {session_id!r}. Open a session first.",
-        ))
+        raise MCPError(
+            INVALID_PARAMS,
+            f"Unknown session_id {session_id!r}. Open a session first.",
+        )
     session = record["session"]
     if not getattr(session, "is_live_session", False):
-        raise McpError(ErrorData(
-            code=INVALID_PARAMS,
-            message=(
+        raise MCPError(
+            INVALID_PARAMS,
+            (
                 f"session_id {session_id!r} is a dump session; there is no "
                 f"running target to {what}."
             ),
-        ))
+        )
     return session
 
 
@@ -345,7 +350,6 @@ def _create_server(
     auto_dump_dir_symbols: bool = True,
 ) -> Server:
     """Create and configure the MCP server with all tools and prompts."""
-    server = Server("mcp-windbg")
 
     def filter_tool_arguments(tool_name: str, arguments: dict | None, call_id: str) -> dict:
         if arguments is None:
@@ -359,16 +363,15 @@ def _create_server(
             return content
         return content_filter.process_output(tool_name, content, transport, call_id)
 
-    @server.list_tools()
-    async def list_tools() -> list[Tool]:
-        return [
+    async def handle_list_tools(ctx, params: PaginatedRequestParams | None) -> ListToolsResult:
+        return ListToolsResult(tools=[
             Tool(
                 name="list_dumps",
                 description="""
                 List Windows crash dump files in a directory.
                 Helps discover dumps to analyze with open_cdb_dump.
                 """,
-                inputSchema=ListDumps.model_json_schema(),
+                input_schema=ListDumps.model_json_schema(),
             ),
             Tool(
                 name="open_cdb_dump",
@@ -377,7 +380,7 @@ def _create_server(
                 Runs .lastevent and !analyze -v (optionally kb/lm/~) and returns a session_id.
                 Use that session_id with run_cdb_command and close_cdb_session.
                 """,
-                inputSchema=OpenCdbDump.model_json_schema(),
+                input_schema=OpenCdbDump.model_json_schema(),
             ),
             Tool(
                 name="open_cdb_remote",
@@ -386,7 +389,7 @@ def _create_server(
                 with 'cdb -server tcp:port=5005 <program>'. Returns a session_id for run_cdb_command
                 / send_ctrl_break / close_cdb_session. For kernel targets use open_kd_session instead.
                 """,
-                inputSchema=OpenCdbRemote.model_json_schema(),
+                input_schema=OpenCdbRemote.model_json_schema(),
             ),
             Tool(
                 name="open_kd_session",
@@ -396,7 +399,7 @@ def _create_server(
                 Connection strings: KDNET 'net:port=50000,key=1.2.3.4', named pipe
                 'com:pipe,port=\\\\.\\pipe\\com_1,baud=115200,reconnect,resets=0', or serial 'com:port=COM1,baud=115200'.
                 """,
-                inputSchema=OpenKdSession.model_json_schema(),
+                input_schema=OpenKdSession.model_json_schema(),
             ),
             Tool(
                 name="run_cdb_command",
@@ -404,7 +407,7 @@ def _create_server(
                 Run a WinDbg/CDB command on a user-mode session (from open_cdb_dump or open_cdb_remote),
                 addressed by session_id. Optional timeout_seconds overrides the default.
                 """,
-                inputSchema=RunCdbCommand.model_json_schema(),
+                input_schema=RunCdbCommand.model_json_schema(),
             ),
             Tool(
                 name="run_kd_command",
@@ -412,21 +415,21 @@ def _create_server(
                 Run a command on a kernel session (from open_kd_session), addressed by session_id.
                 Optional timeout_seconds overrides the default (kernel memory reads can be slow).
                 """,
-                inputSchema=RunKdCommand.model_json_schema(),
+                input_schema=RunKdCommand.model_json_schema(),
             ),
             Tool(
                 name="close_cdb_session",
                 description="""
                 Close a user-mode (cdb) session and release its resources, addressed by session_id.
                 """,
-                inputSchema=CloseCdbSession.model_json_schema(),
+                input_schema=CloseCdbSession.model_json_schema(),
             ),
             Tool(
                 name="close_kd_session",
                 description="""
                 Close a kernel (kd) session and release its resources, addressed by session_id.
                 """,
-                inputSchema=CloseKdSession.model_json_schema(),
+                input_schema=CloseKdSession.model_json_schema(),
             ),
             Tool(
                 name="send_ctrl_break",
@@ -434,7 +437,7 @@ def _create_server(
                 Break into a running live session (cdb remote or kd), addressed by session_id.
                 Useful to interrupt a running target so commands work again.
                 """,
-                inputSchema=SendCtrlBreak.model_json_schema(),
+                input_schema=SendCtrlBreak.model_json_schema(),
             ),
             Tool(
                 name="wait_for_break",
@@ -445,70 +448,74 @@ def _create_server(
                 already stopped. If it is still running when the wait expires, the target is left
                 running: wait again, or halt it with send_ctrl_break.
                 """,
-                inputSchema=WaitForBreak.model_json_schema(),
+                input_schema=WaitForBreak.model_json_schema(),
             ),
-        ]
+        ])
 
-    @server.call_tool()
-    async def call_tool(name, arguments: dict) -> list[TextContent]:
+    async def handle_call_tool(ctx, params: CallToolRequestParams) -> CallToolResult:
+        name = params.name
+        arguments = params.arguments
         try:
             call_id = uuid.uuid4().hex
             arguments = filter_tool_arguments(name, arguments, call_id)
 
             if name == "list_dumps":
-                return filter_tool_content(name, _handle_list_dumps(arguments), call_id)
+                content = filter_tool_content(name, _handle_list_dumps(arguments), call_id)
 
-            if name == "open_cdb_dump":
-                return filter_tool_content(name, _handle_open_cdb_dump(
+            elif name == "open_cdb_dump":
+                content = filter_tool_content(name, _handle_open_cdb_dump(
                     arguments, cdb_path, symbols_path, timeout, verbose, auto_dump_dir_symbols
                 ), call_id)
 
-            if name == "open_cdb_remote":
-                return filter_tool_content(name, _handle_open_cdb_remote(
+            elif name == "open_cdb_remote":
+                content = filter_tool_content(name, _handle_open_cdb_remote(
                     arguments, cdb_path, symbols_path, timeout, verbose
                 ), call_id)
 
-            if name == "open_kd_session":
-                return filter_tool_content(name, _handle_open_kd_session(
+            elif name == "open_kd_session":
+                content = filter_tool_content(name, _handle_open_kd_session(
                     arguments, kd_path, symbols_path, timeout, verbose
                 ), call_id)
 
-            if name == "run_cdb_command":
-                return filter_tool_content(name, _handle_run_command(
+            elif name == "run_cdb_command":
+                content = filter_tool_content(name, _handle_run_command(
                     RunCdbCommand(**arguments), "cdb", CDB_COMMAND_TIMEOUT, timeout
                 ), call_id)
 
-            if name == "run_kd_command":
-                return filter_tool_content(name, _handle_run_command(
+            elif name == "run_kd_command":
+                content = filter_tool_content(name, _handle_run_command(
                     RunKdCommand(**arguments), "kd", KD_COMMAND_TIMEOUT, timeout
                 ), call_id)
 
-            if name == "close_cdb_session":
-                return filter_tool_content(name, _handle_close(CloseCdbSession(**arguments).session_id, "cdb"), call_id)
+            elif name == "close_cdb_session":
+                content = filter_tool_content(name, _handle_close(CloseCdbSession(**arguments).session_id, "cdb"), call_id)
 
-            if name == "close_kd_session":
+            elif name == "close_kd_session":
                 close_args = CloseKdSession(**arguments)
                 record = _sessions.get(close_args.session_id)
                 if record and record["kind"] == "kd":
                     record["session"].resume_on_close = close_args.resume
-                return filter_tool_content(name, _handle_close(close_args.session_id, "kd"), call_id)
+                content = filter_tool_content(name, _handle_close(close_args.session_id, "kd"), call_id)
 
-            if name == "send_ctrl_break":
-                return filter_tool_content(name, _handle_send_ctrl_break(SendCtrlBreak(**arguments).session_id), call_id)
+            elif name == "send_ctrl_break":
+                content = filter_tool_content(name, _handle_send_ctrl_break(SendCtrlBreak(**arguments).session_id), call_id)
 
-            if name == "wait_for_break":
-                return filter_tool_content(name, await _handle_wait_for_break(WaitForBreak(**arguments)), call_id)
+            elif name == "wait_for_break":
+                content = filter_tool_content(name, await _handle_wait_for_break(WaitForBreak(**arguments)), call_id)
 
-            raise McpError(ErrorData(code=INVALID_PARAMS, message=f"Unknown tool: {name}"))
+            else:
+                raise MCPError(INVALID_PARAMS, f"Unknown tool: {name}")
 
-        except McpError:
+            return CallToolResult(content=content)
+
+        except MCPError:
             raise
         except Exception as e:
             traceback_str = traceback.format_exc()
-            raise McpError(ErrorData(
-                code=INTERNAL_ERROR,
-                message=f"Error executing tool {name}: {str(e)}\n{traceback_str}"
-            ))
+            raise MCPError(
+                INTERNAL_ERROR,
+                f"Error executing tool {name}: {str(e)}\n{traceback_str}",
+            )
 
     # -- Tool handlers --------------------------------------------------------
 
@@ -516,12 +523,12 @@ def _create_server(
         args = ListDumps(**arguments)
         directory = args.directory_path or get_local_dumps_path()
         if directory is None:
-            raise McpError(ErrorData(
-                code=INVALID_PARAMS,
-                message="No directory path specified and no default dump path found in registry."
-            ))
+            raise MCPError(
+                INVALID_PARAMS,
+                "No directory path specified and no default dump path found in registry.",
+            )
         if not os.path.exists(directory) or not os.path.isdir(directory):
-            raise McpError(ErrorData(code=INVALID_PARAMS, message=f"Directory not found: {directory}"))
+            raise MCPError(INVALID_PARAMS, f"Directory not found: {directory}")
 
         pattern = os.path.join(directory, "**", "*.*dmp") if args.recursive else os.path.join(directory, "*.*dmp")
         dump_files = sorted(glob.glob(pattern, recursive=args.recursive))
@@ -552,7 +559,7 @@ def _create_server(
                 timeout=effective, verbose=verbose, auto_dump_dir_symbols=auto_dump_dir_symbols,
             )
         except Exception as e:
-            raise McpError(ErrorData(code=INTERNAL_ERROR, message=f"Failed to open cdb dump session: {e}"))
+            raise MCPError(INTERNAL_ERROR, f"Failed to open cdb dump session: {e}")
 
         session_id = _register_session(session, "cdb", f"dump {args.dump_path}")
         results = [_session_header(session_id, "cdb", f"crash dump {args.dump_path}")]
@@ -574,7 +581,7 @@ def _create_server(
                 symbols_path=effective_symbols, timeout=effective, verbose=verbose,
             )
         except Exception as e:
-            raise McpError(ErrorData(code=INTERNAL_ERROR, message=f"Failed to open cdb remote session: {e}"))
+            raise MCPError(INTERNAL_ERROR, f"Failed to open cdb remote session: {e}")
 
         session_id = _register_session(session, "cdb", f"remote {args.connection_string}")
         results = [_session_header(session_id, "cdb", f"remote target {args.connection_string}")]
@@ -596,7 +603,7 @@ def _create_server(
                 symbols_path=effective_symbols, timeout=effective, verbose=verbose,
             )
         except Exception as e:
-            raise McpError(ErrorData(code=INTERNAL_ERROR, message=f"Failed to open kd session: {e}"))
+            raise MCPError(INTERNAL_ERROR, f"Failed to open kd session: {e}")
 
         session_id = _register_session(session, "kd", f"kernel {args.connection_string}")
         results = [_session_header(session_id, "kd", f"kernel target {args.connection_string}")]
@@ -707,9 +714,8 @@ def _create_server(
         },
     }
 
-    @server.list_prompts()
-    async def list_prompts() -> list[Prompt]:
-        return [
+    async def handle_list_prompts(ctx, params: PaginatedRequestParams | None) -> ListPromptsResult:
+        return ListPromptsResult(prompts=[
             Prompt(
                 name=name,
                 title=spec["title"],
@@ -723,27 +729,20 @@ def _create_server(
                 ],
             )
             for name, spec in PROMPT_SPECS.items()
-        ]
+        ])
 
-    @server.get_prompt()
-    async def get_prompt(name: str, arguments: dict | None) -> GetPromptResult:
-        if arguments is None:
-            arguments = {}
+    async def handle_get_prompt(ctx, params: GetPromptRequestParams) -> GetPromptResult:
+        name = params.name
+        arguments = params.arguments or {}
 
         spec = PROMPT_SPECS.get(name)
         if spec is None:
-            raise McpError(ErrorData(
-                code=INVALID_PARAMS,
-                message=f"Unknown prompt: {name}"
-            ))
+            raise MCPError(INVALID_PARAMS, f"Unknown prompt: {name}")
 
         try:
             prompt_content = load_prompt(name)
         except FileNotFoundError as e:
-            raise McpError(ErrorData(
-                code=INTERNAL_ERROR,
-                message=f"Prompt file not found: {e}"
-            ))
+            raise MCPError(INTERNAL_ERROR, f"Prompt file not found: {e}")
 
         target = arguments.get(spec["argument"], "")
         if target:
@@ -764,7 +763,13 @@ def _create_server(
             ],
         )
 
-    return server
+    return Server(
+        "mcp-windbg",
+        on_list_tools=handle_list_tools,
+        on_call_tool=handle_call_tool,
+        on_list_prompts=handle_list_prompts,
+        on_get_prompt=handle_get_prompt,
+    )
 
 
 # Clean up function to ensure all sessions are closed when the server exits

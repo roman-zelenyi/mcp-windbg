@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`mcp` dependency raised to `>=2.0.0,<3.0.0`** - the 1.0.1 release capped it below 2.0 because
+  an unpinned install crashed at startup against the 2.0.0 SDK (`McpError` renamed to `MCPError`,
+  and the low-level `Server` class dropped `@server.list_tools()`-style decorator registration in
+  favor of `on_list_tools=`/`on_call_tool=`/`on_list_prompts=`/`on_get_prompt=` constructor
+  arguments). The server is now ported to that 2.x API, closing out the migration tracked in #78.
+
 ### Added
 
 - **`wait_for_break`** - block until a target you resumed stops again (bugcheck, breakpoint, or a

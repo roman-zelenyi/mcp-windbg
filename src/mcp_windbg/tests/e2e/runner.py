@@ -24,7 +24,7 @@ from anyio import BrokenResourceError, ClosedResourceError
 from mcp.client.session import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
 from mcp.client.streamable_http import streamable_http_client
-from mcp.shared.exceptions import McpError
+from mcp.shared.exceptions import MCPError
 
 from . import harness
 
@@ -215,7 +215,7 @@ async def _run_http(scenario, server_args, remote_server, mapping, timeout) -> N
         url = f"http://127.0.0.1:{port}/mcp"
         try:
             with anyio.fail_after(timeout):
-                async with streamable_http_client(url) as (read_stream, write_stream, _):
+                async with streamable_http_client(url) as (read_stream, write_stream):
                     async with ClientSession(read_stream, write_stream) as session:
                         await session.initialize()
                         await _run_steps(scenario, session, remote_server, mapping)
@@ -271,7 +271,7 @@ async def _run_step(
         name = step["get_prompt"]
         try:
             result = await session.get_prompt(name, arguments or None)
-        except McpError as exc:
+        except MCPError as exc:
             _check(scenario, index, f"get_prompt {name}", expect, str(exc), is_error=True)
             return
         text = "\n".join(
@@ -336,13 +336,13 @@ def _apply_capture(
 
 
 async def _call_tool(session: ClientSession, tool: str, arguments: dict[str, Any]):
-    """Call a tool, normalizing both isError results and raised McpErrors."""
+    """Call a tool, normalizing both isError results and raised MCPErrors."""
     try:
         result = await session.call_tool(tool, arguments)
-    except McpError as exc:
+    except MCPError as exc:
         return True, str(exc)
     text = "\n".join(getattr(item, "text", "") for item in result.content)
-    return bool(result.isError), text
+    return bool(result.is_error), text
 
 
 def _label(scenario: dict[str, Any], index: int, kind: str) -> str:
