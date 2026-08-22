@@ -23,6 +23,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`--cdb-path`/`--kd-path` now expand `%VAR%` and `~`** - an MCP client execs the server directly
+  with no shell in between, so a literal `%LOCALAPPDATA%\...` in a client config never resolved:
+  `find_executable` checked `os.path.isfile` on the raw string, silently fell through to the
+  default search paths, and gave no indication the custom path was ignored. The literal path is
+  still tried first, so a real file whose name happens to contain `%` (a legal Windows filename
+  character) is never reinterpreted as a variable reference.
+
 - **`g` no longer freezes the target it was supposed to release** - go-class commands (`g`, `gh`,
   `gn`, `gN`, `gc`, `gu`) hand the CPU back to the target, after which the debugger stops reading
   its stdin. The marker protocol queued an `.echo` the debugger could not answer, so the command

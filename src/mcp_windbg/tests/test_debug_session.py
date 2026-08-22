@@ -11,6 +11,7 @@ reading its stdin, so anything written to it is queued until the target stops.
 
 from __future__ import annotations
 
+import os
 import queue
 import threading
 import time
@@ -599,3 +600,57 @@ def test_a_timed_out_prefix_still_reports_why_the_target_stopped(make_session):
     with pytest.raises(DebuggerError) as exc:
         session.send_command("bp nt!NtCreateFile; g", timeout=1)
     assert "Fatal System Error" in str(exc.value)
+
+
+def test_find_executable_expands_vars_in_a_custom_path(monkeypatch, tmp_path):
+    """A custom --cdb-path/--kd-path reaches here with no shell in between, so
+    %VAR% and ~ have to be expanded here or they never resolve."""
+    real = tmp_path / "cdb.exe"
+    real.touch()
+    monkeypatch.setenv("MCP_WINDBG_TEST_DIR", str(tmp_path))
+    custom = "%MCP_WINDBG_TEST_DIR%\\cdb.exe"
+
+    assert debug_session.find_executable([], custom) == str(real)
+
+
+def test_find_executable_expands_a_leading_tilde(monkeypatch, tmp_path):
+    real = tmp_path / "cdb.exe"
+    real.touch()
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    assert os.path.normcase(debug_session.find_executable([], "~/cdb.exe")) == os.path.normcase(str(real))
+
+
+def test_find_executable_falls_through_when_custom_path_does_not_resolve(tmp_path):
+    """An unresolved custom path (e.g. a literal %VAR% the OS never expanded)
+    falls through to the defaults instead of raising - find_executable only
+    reports failure by returning None."""
+    default = tmp_path / "default_cdb.exe"
+    default.touch()
+
+    assert debug_session.find_executable([str(default)], "%DOES_NOT_EXIST%\\cdb.exe") == str(default)
+
+
+def test_find_executable_prefers_a_resolved_custom_path_over_defaults(tmp_path):
+    custom = tmp_path / "custom_cdb.exe"
+    custom.touch()
+    default = tmp_path / "default_cdb.exe"
+    default.touch()
+
+    assert debug_session.find_executable([str(default)], str(custom)) == str(custom)
+
+
+def test_find_executable_never_reinterprets_a_literal_path_that_already_exists(monkeypatch, tmp_path):
+    """'%' is a legal Windows filename character. A literal path that happens to
+    exist as typed must win outright, even if it also parses as %ENVVAR% for a
+    variable that is actually set to something else - expansion only applies as
+    a fallback for paths that do not already resolve."""
+    literal_dir = tmp_path / "%MCP_WINDBG_TEST_DIR%"
+    literal_dir.mkdir()
+    real = literal_dir / "cdb.exe"
+    real.touch()
+    monkeypatch.setenv("MCP_WINDBG_TEST_DIR", str(tmp_path / "somewhere_else"))
+    custom = str(literal_dir / "cdb.exe")
+
+    assert debug_session.find_executable([], custom) == custom

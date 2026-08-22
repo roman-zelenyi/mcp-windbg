@@ -123,9 +123,25 @@ def build_debugger_args(
 
 
 def find_executable(paths: List[str], custom_path: Optional[str] = None) -> Optional[str]:
-    """Return the first existing path (custom first, then the defaults)."""
-    if custom_path and os.path.isfile(custom_path):
-        return custom_path
+    """Return the first existing path (custom first, then the defaults).
+
+    ``custom_path`` comes straight from a CLI flag (``--cdb-path``, ``--kd-path``)
+    with no shell in between - an MCP client's JSON config execs the process
+    directly, so nothing expands ``%LOCALAPPDATA%`` or ``~`` before it gets here.
+    The default paths handle this themselves at import time; a custom one has to
+    do it explicitly, or a literal ``%VAR%`` silently falls through to the
+    defaults instead of resolving.
+
+    The literal path is tried first, so a real file whose name happens to
+    contain ``%`` (a legal Windows filename character) is never reinterpreted -
+    expansion only kicks in as a fallback when the literal path does not exist.
+    """
+    if custom_path:
+        if os.path.isfile(custom_path):
+            return custom_path
+        expanded = os.path.expandvars(os.path.expanduser(custom_path))
+        if os.path.isfile(expanded):
+            return expanded
     for path in paths:
         if os.path.isfile(path):
             return path
