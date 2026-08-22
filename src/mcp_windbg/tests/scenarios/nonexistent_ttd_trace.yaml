@@ -1,0 +1,12 @@
+name: Open a TTD trace that does not exist
+description: >
+  A non-existent trace path is reported as a tool error, not a crash. Runs
+  everywhere regardless of whether a WinDbgX-bundled cdb.exe is actually
+  installed: without one, open_ttd_trace itself reports it is unavailable;
+  with one, cdb.exe reports the missing file. Either way it is an error.
+steps:
+  - call: open_ttd_trace
+    arguments:
+      trace_path: "C:/does/not/exist/nope.run"
+    expect:
+      isError: true

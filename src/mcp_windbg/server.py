@@ -8,7 +8,7 @@ import uuid
 from typing import Dict, Optional
 from contextlib import asynccontextmanager
 
-from .cdb_session import CDBSession
+from .cdb_session import CDBSession, find_ttd_cdb
 from .debug_session import DEFAULT_WAIT_FOR_BREAK_TIMEOUT
 from .kd_session import KDSession
 from .filter_script import FilterScript, load_filter_script
@@ -46,6 +46,7 @@ logger = logging.getLogger(__name__)
 #   - a dump's !analyze -v can run for a while,
 #   - a KDNET memory read can be slow, especially on a flaky link.
 CDB_DUMP_OPEN_TIMEOUT = 180
+CDB_TTD_OPEN_TIMEOUT = 180
 CDB_REMOTE_OPEN_TIMEOUT = 60
 KD_OPEN_TIMEOUT = 60
 CDB_COMMAND_TIMEOUT = 60
@@ -186,6 +187,13 @@ class OpenCdbDump(BaseModel):
     include_modules: bool = Field(default=False, description="Include loaded modules (lm) in the initial analysis.")
     include_threads: bool = Field(default=False, description="Include threads (~) in the initial analysis.")
     timeout_seconds: Optional[int] = Field(default=None, description="Override the timeout (seconds) for opening/analyzing this dump.")
+
+
+class OpenTtdTrace(BaseModel):
+    """Parameters for opening a Time Travel Debugging trace (user mode, cdb.exe)."""
+    trace_path: str = Field(description="Path to the TTD trace file (.run)")
+    symbols_path: Optional[str] = Field(default=None, description="Additional symbol search path for PDB resolution.")
+    timeout_seconds: Optional[int] = Field(default=None, description="Override the timeout (seconds) for opening this trace.")
 
 
 class OpenCdbRemote(BaseModel):
@@ -351,6 +359,11 @@ def _create_server(
 ) -> Server:
     """Create and configure the MCP server with all tools and prompts."""
 
+    # Resolved once at server startup rather than per call: whether open_ttd_trace
+    # is even worth advertising depends on a WindowsApps-packaged cdb.exe being
+    # present, and that does not change over the server's lifetime.
+    ttd_cdb_path = find_ttd_cdb()
+
     def filter_tool_arguments(tool_name: str, arguments: dict | None, call_id: str) -> dict:
         if arguments is None:
             arguments = {}
@@ -364,7 +377,7 @@ def _create_server(
         return content_filter.process_output(tool_name, content, transport, call_id)
 
     async def handle_list_tools(ctx, params: PaginatedRequestParams | None) -> ListToolsResult:
-        return ListToolsResult(tools=[
+        tools = [
             Tool(
                 name="list_dumps",
                 description="""
@@ -382,6 +395,23 @@ def _create_server(
                 """,
                 input_schema=OpenCdbDump.model_json_schema(),
             ),
+        ]
+
+        if ttd_cdb_path is not None:
+            tools.append(Tool(
+                name="open_ttd_trace",
+                description="""
+                Open a Time Travel Debugging trace (.run) for replay analysis with cdb.exe (user
+                mode). Unlike open_cdb_dump, this always launches the WinDbgX-bundled cdb.exe build,
+                since the classic Debugging Tools for Windows build cannot open a TTD trace. Runs
+                !index -status and !tt -? and returns a session_id. Use that session_id with
+                run_cdb_command (e.g. '!tt <position>', 'p-', 't-', 'g-' to navigate the trace) and
+                close_cdb_session.
+                """,
+                input_schema=OpenTtdTrace.model_json_schema(),
+            ))
+
+        tools.extend([
             Tool(
                 name="open_cdb_remote",
                 description="""
@@ -451,6 +481,7 @@ def _create_server(
                 input_schema=WaitForBreak.model_json_schema(),
             ),
         ])
+        return ListToolsResult(tools=tools)
 
     async def handle_call_tool(ctx, params: CallToolRequestParams) -> CallToolResult:
         name = params.name
@@ -465,6 +496,11 @@ def _create_server(
             elif name == "open_cdb_dump":
                 content = filter_tool_content(name, _handle_open_cdb_dump(
                     arguments, cdb_path, symbols_path, timeout, verbose, auto_dump_dir_symbols
+                ), call_id)
+
+            elif name == "open_ttd_trace":
+                content = filter_tool_content(name, _handle_open_ttd_trace(
+                    arguments, ttd_cdb_path, symbols_path, timeout, verbose, auto_dump_dir_symbols
                 ), call_id)
 
             elif name == "open_cdb_remote":
@@ -569,6 +605,39 @@ def _create_server(
         analysis = session.send_command("!analyze -v", timeout=effective)
         results.append("### Crash Analysis\n```\n" + "\n".join(analysis) + "\n```\n\n")
         results.extend(_optional_sections(session, args, effective))
+        return [TextContent(type="text", text="".join(results))]
+
+    def _handle_open_ttd_trace(arguments, ttd_cdb_path, symbols_path, server_timeout, verbose, auto_dump_dir_symbols):
+        if ttd_cdb_path is None:
+            # Reachable if a client cached an earlier tool list (or a model
+            # calls it speculatively) after the server started without a
+            # WinDbgX-bundled cdb.exe on this machine.
+            raise MCPError(
+                INTERNAL_ERROR,
+                "TTD trace support is unavailable: no WinDbgX-bundled cdb.exe "
+                "(cdbX64.exe/cdbX86.exe/cdbARM64.exe) was found. Install WinDbg "
+                "from the Microsoft Store - the classic Debugging Tools for "
+                "Windows build cannot open a TTD trace.",
+            )
+
+        args = OpenTtdTrace(**arguments)
+        effective = _effective_timeout(args.timeout_seconds, CDB_TTD_OPEN_TIMEOUT, server_timeout)
+        effective_symbols = _combine_symbols(args.symbols_path, symbols_path)
+        try:
+            session = CDBSession(
+                dump_path=args.trace_path, cdb_path=ttd_cdb_path, symbols_path=effective_symbols,
+                timeout=effective, verbose=verbose, auto_dump_dir_symbols=auto_dump_dir_symbols,
+            )
+        except Exception as e:
+            raise MCPError(INTERNAL_ERROR, f"Failed to open TTD trace session: {e}")
+
+        session_id = _register_session(session, "cdb", f"TTD trace {args.trace_path}")
+        results = [_session_header(session_id, "cdb", f"TTD trace {args.trace_path}")]
+
+        index_status = session.send_command("!index -status", timeout=effective)
+        results.append("### Trace Index Status\n```\n" + "\n".join(index_status) + "\n```\n\n")
+        tt_help = session.send_command("!tt -?", timeout=effective)
+        results.append("### Time Travel Navigation (!tt) Help\n```\n" + "\n".join(tt_help) + "\n```\n\n")
         return [TextContent(type="text", text="".join(results))]
 
     def _handle_open_cdb_remote(arguments, cdb_path, symbols_path, server_timeout, verbose):

@@ -39,6 +39,28 @@ DEFAULT_CDB_PATHS = [
     os.path.expandvars(r"%LOCALAPPDATA%\Microsoft\WindowsApps\cdbARM64.exe"),
 ]
 
+# The WindowsApps-packaged cdb.exe builds specifically - the only ones in
+# DEFAULT_CDB_PATHS that can open a Time Travel Debugging trace (.run). The
+# classic Windows SDK / "Debugging Tools for Windows" builds above sort first
+# there and would otherwise win, but they reject a trace outright with
+# "Could not match Dump File signature - invalid file format" and exit, so a
+# TTD session has to resolve one of these directly rather than going through
+# the general search.
+DEFAULT_CDB_TTD_PATHS = [
+    os.path.expandvars(r"%LOCALAPPDATA%\Microsoft\WindowsApps\cdbX64.exe"),
+    os.path.expandvars(r"%LOCALAPPDATA%\Microsoft\WindowsApps\cdbX86.exe"),
+    os.path.expandvars(r"%LOCALAPPDATA%\Microsoft\WindowsApps\cdbARM64.exe"),
+]
+
+
+def find_ttd_cdb() -> Optional[str]:
+    """First available WinDbgX-bundled cdb.exe build, or None.
+
+    Used both to decide whether ``open_ttd_trace`` is worth advertising and to
+    pick the binary a TTD session actually launches with.
+    """
+    return find_executable(DEFAULT_CDB_TTD_PATHS)
+
 
 class CDBSession(DebuggerSession):
     """A user-mode ``cdb.exe`` session over a dump or a ``-remote`` server."""

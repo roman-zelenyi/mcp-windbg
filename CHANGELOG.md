@@ -17,6 +17,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`open_ttd_trace`** - open a Time Travel Debugging trace (`.run`) for replay analysis. Only
+  advertised when a WinDbgX-bundled `cdb.exe` (`cdbX64.exe`/`cdbX86.exe`/`cdbARM64.exe`) is present -
+  the classic Debugging Tools for Windows build rejects a trace outright with "Could not match Dump
+  File signature" and exits, so it is never used for this even if it sorts first in the usual
+  search path. Runs `!index -status` and `!tt -?` on open (rather than the crash-specific
+  `.lastevent`/`!analyze -v` `open_cdb_dump` runs) and returns a session_id for the existing
+  `run_cdb_command`/`close_cdb_session` tools.
 - **`wait_for_break`** - block until a target you resumed stops again (bugcheck, breakpoint, or a
   CTRL+BREAK from elsewhere) and return everything the debugger printed when it did. If the wait
   expires the target is left running, so waiting never halts a machine behind your back.
